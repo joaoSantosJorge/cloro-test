@@ -1,6 +1,6 @@
 # Meta AI Scraper
 
-A high-throughput scraper for Meta AI that extracts responses, sources, and structured data without requiring a signed-in account. Designed to run locally and handle 1000+ concurrent requests with a 95%+ success rate.
+A scraper for Meta AI that extracts responses, sources, and structured data without requiring a signed-in account.
 
 ## How It Works
 

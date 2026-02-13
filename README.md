@@ -54,6 +54,25 @@ Meta AI streams responses as NDJSON (newline-delimited JSON). The parser:
 3. Extracts inline source URLs (`l.meta.ai` redirects) and resolves them via a dedicated `fetchSources` GraphQL query when a `fetch_id` is available.
 4. Builds the final structured response server-side (plain text, markdown, HTML via `marked`).
 
+### Prompt Strategy
+
+The user's prompt is sent directly to Meta AI as-is. For example, a request with:
+
+```json
+{ "prompt": "What do you know about Tesla's latest updates?" }
+```
+
+Gets sent to Meta AI's GraphQL API as:
+
+```
+What do you know about Tesla's latest updates?
+```
+
+No system prompt is injected. The raw natural-language response from Meta AI is then structured server-side into the JSON output format (text, markdown, HTML, sources). This approach was chosen over system prompt injection because:
+
+- **Real sources** -- Meta AI naturally includes real `l.meta.ai` redirect URLs and `fetch_id` references that resolve to actual web sources. Injecting a system prompt asking for JSON causes the model to fabricate source URLs instead.
+- **Reliability** -- Meta AI doesn't consistently follow structured output instructions. Server-side parsing of the natural NDJSON stream is more reliable than hoping the model returns valid JSON.
+
 ### Persistence
 
 Every response (success or failure) is logged to a local **SQLite database** (`data/meta-ai.db`) using `better-sqlite3` with WAL mode for concurrent read performance. This enables post-run analysis of success rates, latencies, and failure modes.

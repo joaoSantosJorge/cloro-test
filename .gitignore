@@ -1,0 +1,19 @@
+node_modules/
+data/
+.env
+
+# Documentation
+*.md
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*

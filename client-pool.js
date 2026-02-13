@@ -16,6 +16,7 @@ class ClientPool {
     this.poolSize = poolSize;
     this.queueTimeout = opts.queueTimeout || DEFAULT_QUEUE_TIMEOUT;
     this.proxy = opts.proxy || null;
+    this.browserProxy = opts.browserProxy || null;
     this.entries = [];
     this.healthCheckTimer = null;
     this._waitQueue = []; // requests waiting for a free client
@@ -25,7 +26,7 @@ class ClientPool {
     for (let i = 0; i < poolSize; i++) {
       this.entries.push({
         id: i,
-        client: new MetaAIClient(this.proxy, i),
+        client: new MetaAIClient(this.proxy, i, { browserProxy: this.browserProxy }),
         busy: false,
         ready: false,
         initializing: false,

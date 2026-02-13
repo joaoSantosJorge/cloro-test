@@ -10,7 +10,8 @@ app.use(express.json());
 const POOL_SIZE = parseInt(process.env.POOL_SIZE, 10) || 15;
 const QUEUE_TIMEOUT = parseInt(process.env.QUEUE_TIMEOUT, 10) || 120_000;
 const PROXY_URL = process.env.PROXY_URL || null;
-const pool = new ClientPool(POOL_SIZE, { queueTimeout: QUEUE_TIMEOUT, proxy: PROXY_URL });
+const BROWSER_PROXY_URL = process.env.BROWSER_PROXY_URL || null;
+const pool = new ClientPool(POOL_SIZE, { queueTimeout: QUEUE_TIMEOUT, proxy: PROXY_URL, browserProxy: BROWSER_PROXY_URL });
 
 app.post("/v1/monitor/meta-ai", async (req, res) => {
   const startTime = Date.now();
@@ -94,8 +95,8 @@ pool.warmup().then(() => {
   app.listen(PORT, () => {
     console.log(`[server] Meta AI scraper running on http://localhost:${PORT}`);
     console.log(`[server] Pool size: ${POOL_SIZE}, Queue timeout: ${QUEUE_TIMEOUT}ms`);
-    console.log(`[server] Proxy: ${PROXY_URL ? PROXY_URL.replace(/\/\/(.+?)@/, "//*****@") : "none (direct)"}`);
-
+    console.log(`[server] API proxy: ${PROXY_URL ? PROXY_URL.replace(/\/\/(.+?)@/, "//*****@") : "none (direct)"}`);
+    console.log(`[server] Browser proxy: ${BROWSER_PROXY_URL ? BROWSER_PROXY_URL.replace(/\/\/(.+?)@/, "//*****@") : "none (direct)"}`);
   });
 }).catch((err) => {
   console.error("[server] Failed to start:", err.message);

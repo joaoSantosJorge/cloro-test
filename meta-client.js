@@ -135,27 +135,81 @@ function extractValue(text, startStr, endStr) {
 }
 
 class MetaAIClient {
-  constructor(proxy = null, id = null) {
+  constructor(proxy = null, id = null, opts = {}) {
+    this.id = id;
+    this.logPrefix = id != null ? `[meta-client:${id}]` : "[meta-client]";
+
+    // API proxy (Bright Data) — used for fetch() calls with TLS bypass
     this.proxy = proxy;
-    this.proxyDispatcher = proxy ? new ProxyAgent(proxy) : undefined;
-    // Parse proxy URL for Puppeteer (Chrome needs host:port separately from credentials)
+    this.sessionId = null;
     if (proxy) {
-      const parsed = new URL(proxy);
-      this.proxyServer = `${parsed.protocol}//${parsed.hostname}:${parsed.port}`;
-      this.proxyAuth = parsed.username
+      this.sessionId = this._generateSessionId();
+      this.proxyDispatcher = this._createProxyAgent(proxy);
+    } else {
+      this.proxyDispatcher = undefined;
+    }
+
+    // Browser proxy — used for Puppeteer/Chrome cookie extraction
+    // When unset (default for Bright Data), Chrome runs direct — no MITM, no SRI issues
+    const browserProxy = opts.browserProxy || null;
+    if (browserProxy) {
+      const parsed = new URL(browserProxy);
+      this.browserProxyServer = `${parsed.protocol}//${parsed.hostname}:${parsed.port}`;
+      this.browserProxyAuth = parsed.username
         ? { username: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password) }
         : null;
     } else {
-      this.proxyServer = null;
-      this.proxyAuth = null;
+      this.browserProxyServer = null;
+      this.browserProxyAuth = null;
     }
-    this.id = id;
-    this.logPrefix = id != null ? `[meta-client:${id}]` : "[meta-client]";
+
     this.cookies = null;
     this.accessToken = null;
     this.userAgent = id != null
       ? USER_AGENTS[id % USER_AGENTS.length]
       : USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  }
+
+  /**
+   * Generate a unique session ID for Bright Data IP pinning.
+   * Format: c{clientId}_{random}_{random}
+   */
+  _generateSessionId() {
+    const rand1 = crypto.randomBytes(3).toString("hex");
+    const rand2 = crypto.randomBytes(4).toString("hex");
+    return `c${this.id ?? 0}_${rand1}_${rand2}`;
+  }
+
+  /**
+   * Create a ProxyAgent with session-pinned URL and TLS bypass for Bright Data MITM.
+   * Appends `-session-{id}` to the Bright Data username for IP pinning.
+   */
+  _createProxyAgent(proxyUrl) {
+    const parsed = new URL(proxyUrl);
+
+    // Append session ID to username for Bright Data IP pinning
+    if (this.sessionId && parsed.username) {
+      parsed.username = `${decodeURIComponent(parsed.username)}-session-${this.sessionId}`;
+    }
+
+    console.log(`${this.logPrefix} ProxyAgent session: ${this.sessionId}`);
+
+    return new ProxyAgent({
+      uri: parsed.toString(),
+      requestTls: { rejectUnauthorized: false },
+      proxyTls: { rejectUnauthorized: false },
+    });
+  }
+
+  /**
+   * Rotate proxy session — generates a new session ID and recreates the ProxyAgent.
+   * This gives us a new exit IP from Bright Data's residential pool.
+   */
+  _rotateProxySession() {
+    if (!this.proxy) return;
+    this.sessionId = this._generateSessionId();
+    this.proxyDispatcher = this._createProxyAgent(this.proxy);
+    console.log(`${this.logPrefix} Rotated proxy session → ${this.sessionId}`);
   }
 
   /**
@@ -188,13 +242,13 @@ class MetaAIClient {
           "--disable-translate",
           "--no-first-run",
           "--lang=en-US,en",
-          ...(this.proxyServer ? [`--proxy-server=${this.proxyServer}`] : []),
+          ...(this.browserProxyServer ? [`--proxy-server=${this.browserProxyServer}`] : []),
         ],
       });
 
       const page = await browser.newPage();
-      if (this.proxyAuth) {
-        await page.authenticate(this.proxyAuth);
+      if (this.browserProxyAuth) {
+        await page.authenticate(this.browserProxyAuth);
       }
       await page.setUserAgent(this.userAgent);
       await page.setViewport({ width: 1920, height: 1080 });
@@ -855,6 +909,7 @@ class MetaAIClient {
   resetSession() {
     this.cookies = null;
     this.accessToken = null;
+    this._rotateProxySession();
   }
 }
 

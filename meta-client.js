@@ -6,6 +6,31 @@ const { ProxyAgent } = require("undici");
 
 puppeteer.use(StealthPlugin());
 
+// Browser launch semaphore — prevents OOM from too many Chrome instances at once
+const MAX_CONCURRENT_BROWSERS = 3;
+let activeBrowsers = 0;
+const browserQueue = [];
+
+function acquireBrowserSlot() {
+  return new Promise((resolve) => {
+    if (activeBrowsers < MAX_CONCURRENT_BROWSERS) {
+      activeBrowsers++;
+      resolve();
+    } else {
+      browserQueue.push(resolve);
+    }
+  });
+}
+
+function releaseBrowserSlot() {
+  if (browserQueue.length > 0) {
+    const next = browserQueue.shift();
+    next();
+  } else {
+    activeBrowsers--;
+  }
+}
+
 // Realistic User-Agent pool — each pool client gets a distinct one (15+ entries)
 const USER_AGENTS = [
   // Chrome — Windows
@@ -138,33 +163,52 @@ class MetaAIClient {
    * Meta AI uses TLS fingerprinting/bot detection that blocks plain HTTP clients.
    */
   async getCookies() {
-    console.log(`${this.logPrefix} Launching browser to extract cookies...`);
+    await acquireBrowserSlot();
+    console.log(`${this.logPrefix} Launching browser to extract cookies... (active: ${activeBrowsers}/${MAX_CONCURRENT_BROWSERS})`);
 
-    const browser = await puppeteer.launch({
-      headless: "new",
-      executablePath:
-        process.env.CHROME_PATH ||
-        "C:/Program Files/Google/Chrome/Application/chrome.exe",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-        "--window-size=1920,1080",
-        "--start-maximized",
-        "--disable-dev-shm-usage",
-        "--lang=en-US,en",
-        ...(this.proxyServer ? [`--proxy-server=${this.proxyServer}`] : []),
-      ],
-    });
-
+    let browser;
     try {
+      browser = await puppeteer.launch({
+        headless: "new",
+        executablePath:
+          process.env.CHROME_PATH ||
+          "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-infobars",
+          "--window-size=1920,1080",
+          "--start-maximized",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--disable-default-apps",
+          "--disable-translate",
+          "--no-first-run",
+          "--lang=en-US,en",
+          ...(this.proxyServer ? [`--proxy-server=${this.proxyServer}`] : []),
+        ],
+      });
+
       const page = await browser.newPage();
       if (this.proxyAuth) {
         await page.authenticate(this.proxyAuth);
       }
       await page.setUserAgent(this.userAgent);
       await page.setViewport({ width: 1920, height: 1080 });
+
+      // Block heavy resources to save proxy bandwidth
+      await page.setRequestInterception(true);
+      page.on("request", (req) => {
+        const type = req.resourceType();
+        if (["image", "font", "stylesheet", "media", "texttrack", "manifest"].includes(type)) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
 
       // Set realistic browser properties
       await page.evaluateOnNewDocument(() => {
@@ -176,26 +220,39 @@ class MetaAIClient {
         });
       });
 
-      // Navigate with retry — Meta AI sometimes redirects, destroying the context
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          await page.goto("https://www.meta.ai/", {
-            waitUntil: "load",
-            timeout: 90000,
-          });
-          break;
-        } catch (navErr) {
-          if (attempt === 1 || !navErr.message.includes("Execution context")) throw navErr;
-          console.log(`${this.logPrefix} Navigation redirect, retrying...`);
-          await new Promise((r) => setTimeout(r, 2000));
-        }
+      // Navigate — catch all navigation errors (redirects, context destruction)
+      // and wait for the page to settle regardless
+      try {
+        await page.goto("https://www.meta.ai/", {
+          waitUntil: "load",
+          timeout: 90000,
+        });
+      } catch (navErr) {
+        const msg = navErr.message || "";
+        if (!msg.includes("Execution context") && !msg.includes("navigation")) throw navErr;
+        console.log(`${this.logPrefix} Redirect detected, waiting for page to settle...`);
       }
 
-      // Let any client-side redirects settle
-      await new Promise((r) => setTimeout(r, 3000));
+      // Wait for the page to have real content (JS needs to populate the React shell)
+      try {
+        await page.waitForFunction(
+          () => document.documentElement.innerHTML.length > 10000,
+          { timeout: 60000 }
+        );
+      } catch {
+        console.log(`${this.logPrefix} Page content still small after 60s wait`);
+      }
+
+      // Log where we actually ended up
+      const currentUrl = page.url();
+      console.log(`${this.logPrefix} Landed on: ${currentUrl}`);
 
       // Extract tokens from the page HTML
       const html = await page.content();
+
+      // Debug: log page title and HTML snippet to diagnose proxy issues
+      const title = html.match(/<title[^>]*>(.*?)<\/title>/i)?.[1] || "(no title)";
+      console.log(`${this.logPrefix} Page title: "${title}" | HTML length: ${html.length} | Has LSD: ${html.includes('"LSD"')}`);
 
       this.cookies = {
         _js_datr: extractValue(html, '_js_datr":{"value":"', '",'),
@@ -242,7 +299,15 @@ class MetaAIClient {
 
       return this.cookies;
     } finally {
-      await browser.close();
+      try {
+        await browser.close();
+      } catch { /* ignore */ }
+      // Force-kill Chrome process in case browser.close() left orphans
+      try {
+        const proc = browser.process();
+        if (proc && !proc.killed) proc.kill("SIGKILL");
+      } catch { /* ignore */ }
+      releaseBrowserSlot();
     }
   }
 

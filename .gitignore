@@ -17,3 +17,10 @@ Desktop.ini
 # Logs
 *.log
 npm-debug.log*
+
+# Claude Code
+.claude/
+
+# Misc
+nul
+responses/

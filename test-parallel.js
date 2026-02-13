@@ -11,9 +11,10 @@
  *       built-in variable (default "$P$G") that controls the cmd.exe prompt.
  */
 
-require("dotenv").config();
+require("dotenv").config({ override: true });
 
 const CONCURRENCY = parseInt(process.env.CONCURRENCY, 10) || 100;
+const MAX_IN_FLIGHT = parseInt(process.env.MAX_IN_FLIGHT, 10) || 50;
 const TEST_PROMPT = process.env.TEST_PROMPT || "What are the latest developments in AI?";
 const PORT = process.env.PORT || 8000;
 const API_KEY = process.env.API_KEY || "sk_live_test";
@@ -89,15 +90,28 @@ function percentile(sorted, p) {
 
 async function main() {
   console.log(`\n=== Parallel Test ===`);
-  console.log(`Concurrency: ${CONCURRENCY}`);
+  console.log(`Total requests: ${CONCURRENCY}`);
+  console.log(`Max in-flight: ${MAX_IN_FLIGHT}`);
   console.log(`Prompt: "${TEST_PROMPT}"`);
   console.log(`Server: ${BASE_URL}`);
-  console.log(`\nFiring ${CONCURRENCY} requests...\n`);
+  console.log(`\nFiring ${CONCURRENCY} requests (max ${MAX_IN_FLIGHT} in-flight)...\n`);
 
   const overallStart = Date.now();
 
-  const promises = Array.from({ length: CONCURRENCY }, (_, i) => sendRequest(i));
-  const results = await Promise.all(promises);
+  // Throttle: keep at most MAX_IN_FLIGHT requests running at once
+  const results = [];
+  let nextIndex = 0;
+
+  async function runNext() {
+    while (nextIndex < CONCURRENCY) {
+      const i = nextIndex++;
+      const result = await sendRequest(i);
+      results.push(result);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(MAX_IN_FLIGHT, CONCURRENCY) }, () => runNext());
+  await Promise.all(workers);
 
   const overallDuration = Date.now() - overallStart;
 

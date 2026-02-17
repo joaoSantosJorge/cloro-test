@@ -283,16 +283,10 @@ class MetaAIClient:
         return self.access_token
 
     async def ensure_session(self):
-        """Ensure we have valid cookies and access token. Retries once on failure."""
-        try:
-            if not self.cookies:
-                await self.get_cookies()
-            if not self.access_token:
-                await self.get_access_token()
-        except Exception as err:
-            print(f"{self.log_prefix} Session setup failed, retrying: {err}")
-            self.reset_session()
+        """Ensure we have valid cookies and access token."""
+        if not self.cookies:
             await self.get_cookies()
+        if not self.access_token:
             await self.get_access_token()
 
     async def _fire_message(self, prompt: str) -> str:

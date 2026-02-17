@@ -29,6 +29,7 @@ PROXY_URL = os.getenv("PROXY_URL", "")
 PROMPT = os.getenv("PROMPT", "What do you know about Tesla's latest updates?")
 TOTAL_REQUESTS = int(os.getenv("TOTAL_REQUESTS", "1000"))
 PARALLEL_REQUESTS = int(os.getenv("PARALLEL_REQUESTS", "15"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "meta-ai.db"
 
@@ -108,60 +109,73 @@ async def run_single(
     semaphore: asyncio.Semaphore,
     queue: asyncio.Queue,
 ) -> None:
-    """Execute a single Meta AI request and push the result onto the queue."""
+    """Execute a single Meta AI request, retrying with a fresh proxy IP on failure."""
     async with semaphore:
-        session_id = uuid.uuid4().hex
-        proxy_url = make_session_proxy(PROXY_URL, session_id) if PROXY_URL else None
-        client = MetaAIClient(proxy=proxy_url, client_id=index)
-
         row_id = str(uuid.uuid4())
         ts = time.time()
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
         tagged_prompt = f"{SYSTEM_PROMPT}\n\nUser query: {PROMPT}"
+        start = time.monotonic()
 
-        try:
-            start = time.monotonic()
-            result = await client.prompt(tagged_prompt)
-            duration_ms = int((time.monotonic() - start) * 1000)
+        last_error = None
+        for attempt in range(MAX_RETRIES + 1):
+            session_id = uuid.uuid4().hex
+            proxy_url = make_session_proxy(PROXY_URL, session_id) if PROXY_URL else None
+            client = MetaAIClient(proxy=proxy_url, client_id=index)
 
-            text = result.get("result", {}).get("text", "")
-            sources = result.get("result", {}).get("sources", [])
-            model = result.get("result", {}).get("model", "")
+            try:
+                result = await client.prompt(tagged_prompt)
+                duration_ms = int((time.monotonic() - start) * 1000)
 
-            await queue.put(
-                {
-                    "id": row_id,
-                    "timestamp": ts_iso,
-                    "timestamp_unix": int(ts),
-                    "duration_ms": duration_ms,
-                    "prompt": PROMPT,
-                    "country": "US",
-                    "success": 1,
-                    "text_length": len(text),
-                    "source_count": len(sources),
-                    "model": model,
-                    "result_json": json.dumps(result, ensure_ascii=False),
-                }
-            )
-        except Exception as exc:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            await queue.put(
-                {
-                    "id": row_id,
-                    "timestamp": ts_iso,
-                    "timestamp_unix": int(ts),
-                    "duration_ms": duration_ms,
-                    "prompt": PROMPT,
-                    "country": "US",
-                    "success": 0,
-                    "text_length": 0,
-                    "source_count": 0,
-                    "model": "",
-                    "result_json": json.dumps({"error": str(exc)}, ensure_ascii=False),
-                }
-            )
-        finally:
-            await client.close()
+                text = result.get("result", {}).get("text", "")
+                sources = result.get("result", {}).get("sources", [])
+                model = result.get("result", {}).get("model", "")
+
+                await queue.put(
+                    {
+                        "id": row_id,
+                        "timestamp": ts_iso,
+                        "timestamp_unix": int(ts),
+                        "duration_ms": duration_ms,
+                        "prompt": PROMPT,
+                        "country": "US",
+                        "success": 1,
+                        "text_length": len(text),
+                        "source_count": len(sources),
+                        "model": model,
+                        "result_json": json.dumps(result, ensure_ascii=False),
+                    }
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < MAX_RETRIES:
+                    print(
+                        f"[runner:{index}] Attempt {attempt + 1} failed, "
+                        f"retrying with new IP: {exc}"
+                    )
+            finally:
+                await client.close()
+
+        # All retries exhausted
+        duration_ms = int((time.monotonic() - start) * 1000)
+        await queue.put(
+            {
+                "id": row_id,
+                "timestamp": ts_iso,
+                "timestamp_unix": int(ts),
+                "duration_ms": duration_ms,
+                "prompt": PROMPT,
+                "country": "US",
+                "success": 0,
+                "text_length": 0,
+                "source_count": 0,
+                "model": "",
+                "result_json": json.dumps(
+                    {"error": str(last_error)}, ensure_ascii=False
+                ),
+            }
+        )
 
 
 async def db_writer(

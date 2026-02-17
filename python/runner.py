@@ -1,7 +1,7 @@
 """
 Batch runner for Meta AI scraper.
 
-Sends TOTAL_REQUESTS parallel prompts through Bright Data rotating proxies,
+Sends TOTAL_REQUESTS parallel prompts through Decodo rotating proxies,
 writing every result to SQLite via a serialized db_writer coroutine.
 """
 
@@ -60,9 +60,9 @@ SYSTEM_PROMPT = (
 
 
 def make_session_proxy(base_url: str, session_id: str, country: str = "us") -> str:
-    """Build a session-pinned Bright Data proxy URL."""
+    """Build a session-pinned Decodo proxy URL."""
     parsed = urlparse(base_url)
-    new_username = f"{parsed.username}-country-{country}-session-{session_id}"
+    new_username = f"user-{parsed.username}-country-{country}-session-{session_id}"
     netloc = f"{new_username}:{parsed.password}@{parsed.hostname}:{parsed.port}"
     return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
 

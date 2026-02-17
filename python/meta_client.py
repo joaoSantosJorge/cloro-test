@@ -150,9 +150,6 @@ class MetaAIClient:
                 },
             )
 
-            # Brief delay to let the challenge verification propagate
-            await asyncio.sleep(1 + attempt)
-
             # Retry the original homepage request
             resp = await session.get(
                 "https://www.meta.ai/",

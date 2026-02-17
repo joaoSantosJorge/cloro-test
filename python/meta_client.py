@@ -90,6 +90,7 @@ class MetaAIClient:
                 impersonate="chrome110",
                 proxy=self.proxy,
                 timeout=90,
+                verify=self.proxy is None,
             )
         return self._session
 
@@ -126,14 +127,18 @@ class MetaAIClient:
         print(f"{self.log_prefix} HTTP status: {resp.status_code}, HTML size: {len(resp.text)} bytes")
 
         # Handle JavaScript bot-detection challenge (403 with /__rd_verify_ endpoint)
-        if resp.status_code == 403 and "/__rd_verify_" in resp.text:
+        max_challenge_attempts = 3
+        for attempt in range(max_challenge_attempts):
+            if resp.status_code != 403 or "/__rd_verify_" not in resp.text:
+                break
+
             challenge_match = re.search(r"fetch\('(/__rd_verify_[^']+)'", resp.text)
             if not challenge_match:
                 raise Exception(
                     f"Got 403 with challenge page but could not extract challenge path: {resp.text[:500]}"
                 )
             challenge_path = challenge_match.group(1)
-            print(f"{self.log_prefix} Solving bot-detection challenge: {challenge_path}")
+            print(f"{self.log_prefix} Solving bot-detection challenge (attempt {attempt + 1}): {challenge_path}")
 
             await session.post(
                 f"https://www.meta.ai{challenge_path}",
@@ -144,6 +149,9 @@ class MetaAIClient:
                     "Referer": "https://www.meta.ai/",
                 },
             )
+
+            # Brief delay to let the challenge verification propagate
+            await asyncio.sleep(1 + attempt)
 
             # Retry the original homepage request
             resp = await session.get(

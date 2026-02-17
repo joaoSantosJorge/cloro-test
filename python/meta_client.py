@@ -125,6 +125,44 @@ class MetaAIClient:
 
         print(f"{self.log_prefix} HTTP status: {resp.status_code}, HTML size: {len(resp.text)} bytes")
 
+        # Handle JavaScript bot-detection challenge (403 with /__rd_verify_ endpoint)
+        if resp.status_code == 403 and "/__rd_verify_" in resp.text:
+            challenge_match = re.search(r"fetch\('(/__rd_verify_[^']+)'", resp.text)
+            if not challenge_match:
+                raise Exception(
+                    f"Got 403 with challenge page but could not extract challenge path: {resp.text[:500]}"
+                )
+            challenge_path = challenge_match.group(1)
+            print(f"{self.log_prefix} Solving bot-detection challenge: {challenge_path}")
+
+            await session.post(
+                f"https://www.meta.ai{challenge_path}",
+                headers={
+                    "User-Agent": self.user_agent,
+                    "Accept": "*/*",
+                    "Origin": "https://www.meta.ai",
+                    "Referer": "https://www.meta.ai/",
+                },
+            )
+
+            # Retry the original homepage request
+            resp = await session.get(
+                "https://www.meta.ai/",
+                headers={
+                    "User-Agent": self.user_agent,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Cache-Control": "no-cache",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+                allow_redirects=True,
+            )
+            print(f"{self.log_prefix} Post-challenge HTTP status: {resp.status_code}, HTML size: {len(resp.text)} bytes")
+
         if resp.status_code != 200:
             raise Exception(
                 f"Got HTTP {resp.status_code} from meta.ai: {resp.text[:500]}"

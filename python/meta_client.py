@@ -71,9 +71,6 @@ class MetaAIClient:
     def __init__(self, proxy: str | None = None, client_id: int | None = None):
         self.proxy = proxy
         self.client_id = client_id
-        self.log_prefix = (
-            f"[meta-client:{client_id}]" if client_id is not None else "[meta-client]"
-        )
         self.cookies: dict | None = None
         self.access_token: str | None = None
         self.user_agent = (
@@ -105,7 +102,6 @@ class MetaAIClient:
         Fetch cookies from the Meta AI homepage.
         Uses curl_cffi with Chrome TLS impersonation to bypass fingerprinting.
         """
-        print(f"{self.log_prefix} Fetching cookies from meta.ai...")
         session = await self._get_session()
 
         resp = await session.get(
@@ -124,8 +120,6 @@ class MetaAIClient:
             allow_redirects=True,
         )
 
-        print(f"{self.log_prefix} HTTP status: {resp.status_code}, HTML size: {len(resp.text)} bytes")
-
         # Handle JavaScript bot-detection challenge (403 with /__rd_verify_ endpoint)
         max_challenge_attempts = 3
         for attempt in range(max_challenge_attempts):
@@ -138,7 +132,6 @@ class MetaAIClient:
                     f"Got 403 with challenge page but could not extract challenge path: {resp.text[:500]}"
                 )
             challenge_path = challenge_match.group(1)
-            print(f"{self.log_prefix} Solving bot-detection challenge (attempt {attempt + 1}): {challenge_path}")
 
             await session.post(
                 f"https://www.meta.ai{challenge_path}",
@@ -166,7 +159,6 @@ class MetaAIClient:
                 },
                 allow_redirects=True,
             )
-            print(f"{self.log_prefix} Post-challenge HTTP status: {resp.status_code}, HTML size: {len(resp.text)} bytes")
 
         if resp.status_code != 200:
             raise Exception(
@@ -192,12 +184,6 @@ class MetaAIClient:
                 "Failed to extract LSD token from Meta AI homepage. "
                 "Bot detection likely triggered. Try with a proxy."
             )
-
-        cookie_preview = {
-            k: (v[:10] + "..." if v else "(empty)")
-            for k, v in self.cookies.items()
-        }
-        print(f"{self.log_prefix} Extracted cookies: {cookie_preview}")
 
         return self.cookies
 
@@ -279,7 +265,6 @@ class MetaAIClient:
                 f"Response: {json.dumps(data)[:500]}"
             )
 
-        print(f"{self.log_prefix} Got access token: {self.access_token[:20]}...")
         return self.access_token
 
     async def ensure_session(self):
@@ -358,7 +343,6 @@ class MetaAIClient:
 
         # Detect exhausted token — refresh session and retry once
         if self._is_session_exhausted(response_text):
-            print(f"{self.log_prefix} Session exhausted, refreshing token and retrying...")
             self.reset_session()
             await self.ensure_session()
             response_text = await self._fire_message(prompt)
@@ -366,17 +350,7 @@ class MetaAIClient:
             if self._is_session_exhausted(response_text):
                 raise Exception("Session exhausted even after refresh")
 
-        lines = [l for l in response_text.split("\n") if l.strip()]
-        print(
-            f"{self.log_prefix} Raw response: {len(response_text)} bytes, "
-            f"lines: {len(lines)}"
-        )
-
         parsed = self.parse_response(response_text)
-
-        if not parsed["text"]:
-            print(f"{self.log_prefix} WARNING: Empty parsed text. Raw preview:")
-            print(response_text[:1000])
 
         # Fetch real source URLs if a fetch_id is available
         if parsed.get("fetch_id"):
@@ -384,8 +358,8 @@ class MetaAIClient:
                 sources = await self.fetch_sources(parsed["fetch_id"])
                 if sources:
                     parsed["raw_sources"] = sources
-            except Exception as err:
-                print(f"{self.log_prefix} Failed to fetch sources: {err}")
+            except Exception:
+                pass
 
         return parsed
 

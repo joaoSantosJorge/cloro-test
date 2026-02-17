@@ -150,10 +150,7 @@ async def run_single(
             except Exception as exc:
                 last_error = exc
                 if attempt < MAX_RETRIES:
-                    print(
-                        f"[runner:{index}] Attempt {attempt + 1} failed, "
-                        f"retrying with new IP: {exc}"
-                    )
+                    print(f"[runner] #{index} retry {attempt + 1}/{MAX_RETRIES}")
             finally:
                 await client.close()
 

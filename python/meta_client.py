@@ -11,12 +11,10 @@ import re
 import time
 import uuid
 import os
-import struct
 import asyncio
 from urllib.parse import unquote, urlparse
 
 from curl_cffi.requests import AsyncSession
-import markdown as md
 
 # Realistic User-Agent pool — each pool client gets a distinct one
 USER_AGENTS = [
@@ -504,7 +502,7 @@ class MetaAIClient:
         """Build the structured response from raw text."""
         clean_text = text.strip()
         markdown_text = clean_text
-        html_text = f'<div class="markdown">{md.markdown(markdown_text)}</div>'
+        html_text = ""
 
         sources = [
             {

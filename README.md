@@ -16,9 +16,15 @@ The scraper operates in three stages per request:
 
 ```
 python/
-  main.py            CLI entry point
+  main.py            CLI entry point (single query)
+  runner.py          Batch runner with SQLite storage
   meta_client.py     Core scraper: cookie extraction, token auth, message sending
+  check_results.py   Terminal viewer + CSV export
+  dashboard.py       Streamlit web dashboard
   requirements.txt   Python dependencies
+data/
+  meta-ai.db         SQLite database (created by runner.py)
+  results.csv        CSV export (created by check_results.py --csv)
 ```
 
 ## Prerequisites
@@ -34,8 +40,14 @@ pip install -r python/requirements.txt
 
 ## Usage
 
+### Single query
+
 ```bash
+# Windows
 python python/main.py "What are the latest developments in AI?"
+
+# Linux / macOS
+python3 python/main.py "What are the latest developments in AI?"
 ```
 
 With a proxy:
@@ -43,6 +55,30 @@ With a proxy:
 ```bash
 python python/main.py "What is quantum computing?" --proxy http://user:pass@host:port
 ```
+
+### Batch run (at scale)
+
+Create a `.env` file in the project root with your configuration:
+
+```
+PROXY_URL=http://user:pass@host:port
+PROMPT=What do you know about Tesla's latest updates?
+TOTAL_REQUESTS=1000
+PARALLEL_REQUESTS=15
+MAX_RETRIES=2
+```
+
+Then run:
+
+```bash
+# Windows
+python python/runner.py
+
+# Linux / macOS
+python3 python/runner.py
+```
+
+Results are saved to `data/meta-ai.db`.
 
 ## Output
 
@@ -67,6 +103,61 @@ python python/main.py "What is quantum computing?" --proxy http://user:pass@host
   }
 }
 ```
+
+## Viewing Results
+
+After a batch run, there are three ways to explore the results stored in `data/meta-ai.db`.
+
+### Terminal summary
+
+```bash
+# Windows
+python python/check_results.py            # one-line summary per request
+python python/check_results.py -d         # include full response JSON
+python python/check_results.py -d 5       # full JSON for request #5 only
+
+# Linux / macOS
+python3 python/check_results.py
+python3 python/check_results.py -d
+python3 python/check_results.py -d 5
+```
+
+### CSV export
+
+Export all results to `data/results.csv` for use in Excel or Google Sheets:
+
+```bash
+# Windows
+python python/check_results.py --csv
+
+# Linux / macOS
+python3 python/check_results.py --csv
+```
+
+Columns: `id`, `timestamp`, `success`, `duration_ms`, `text_length`, `source_count`, `model`, `error_or_preview`.
+
+### Web dashboard (Streamlit)
+
+Interactive browser dashboard with summary cards, charts, and a searchable results table.
+
+```bash
+# Windows
+streamlit run python/dashboard.py
+
+# Linux / macOS
+streamlit run python/dashboard.py
+```
+
+Opens at [http://localhost:8501](http://localhost:8501). Features:
+
+- **Summary cards** — total requests, successes, failures, success rate, avg duration
+- **Charts** — success/fail breakdown, duration histogram, rolling success rate
+- **Results table** — filterable by status, searchable by response content
+- **Expandable JSON** — click any row to inspect the full response
+
+### DB Browser for SQLite
+
+For ad-hoc SQL queries, open `data/meta-ai.db` directly with [DB Browser for SQLite](https://sqlitebrowser.org/dl/) (free, cross-platform).
 
 ## Design Decisions
 

@@ -23,7 +23,7 @@ from meta_client import MetaAIClient
 # Config
 # ---------------------------------------------------------------------------
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 PROXY_URL = os.getenv("PROXY_URL", "")
 PROMPT = os.getenv("PROMPT", "What do you know about Tesla's latest updates?")

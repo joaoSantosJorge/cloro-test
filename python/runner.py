@@ -109,6 +109,12 @@ async def run_single(
                 sources = result.get("result", {}).get("sources", [])
                 model = result.get("result", {}).get("model", "")
 
+                # Validate response quality — retry on empty or useless answers
+                if not text.strip():
+                    raise Exception("Empty response from Meta AI")
+                if len(text) < 200 and not sources:
+                    raise Exception(f"Low-quality response ({len(text)} chars, no sources): {text[:100]}")
+
                 await queue.put(
                     {
                         "id": row_id,

@@ -33,28 +33,6 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "meta-ai.db"
 
-SYSTEM_PROMPT = (
-    "You are an API backend model that must always return responses in a strict JSON schema.\n"
-    "Your goal is to produce comprehensive, deeply informative, and structured content — "
-    "at least several paragraphs long — while respecting the format rules below.\n\n"
-    "When given a user query:\n"
-    "1. Produce a long, detailed answer with clear explanations, comparisons, and examples.\n"
-    "2. Include both:\n"
-    "   - A markdown version (formatted with headers, bold, lists, tables, etc.)\n"
-    "   - A plain text version (identical content but without markdown formatting)\n"
-    "3. Include at least 3 to 7 credible sources.\n"
-    "4. Include 3 to 6 search queries that could help someone find this answer online.\n"
-    "5. Include the model used in format \"model\": \"meta-ai\".\n"
-    "6. Return nothing outside the JSON — no commentary or extra lines.\n\n"
-    "Your output must always follow this structure:\n"
-    '{"success":true,"result":{"markdown":"string","text":"string",'
-    '"sources":[{"position":0,"label":"string","url":"string","description":"string"}],'
-    '"searchQueries":["string"],"model":"string"}}\n\n'
-    "The answer should be at least 250-400 words long. Use factual, neutral, and informative tone.\n"
-    "If information is missing, return an empty string or empty array instead of omitting fields.\n"
-    "No explanations or reasoning outside the JSON are allowed."
-)
-
 # ---------------------------------------------------------------------------
 # Proxy helpers
 # ---------------------------------------------------------------------------
@@ -114,7 +92,7 @@ async def run_single(
         row_id = str(uuid.uuid4())
         ts = time.time()
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-        tagged_prompt = f"{SYSTEM_PROMPT}\n\nUser query: {PROMPT}"
+        tagged_prompt = PROMPT
         start = time.monotonic()
 
         last_error = None

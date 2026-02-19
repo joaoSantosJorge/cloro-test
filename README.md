@@ -66,11 +66,9 @@ Create a `.env` file in the project root with your configuration:
 PROXY_URL=http://user:pass@host:port
 PROMPT=What do you know about Tesla's latest updates?
 TOTAL_REQUESTS=1000
-PARALLEL_REQUESTS=50
+PARALLEL_REQUESTS=500
 MAX_RETRIES=2
 ```
-
-> **Windows limit:** `PARALLEL_REQUESTS` should stay at **50–100** on Windows. The `select()` syscall has a 512 file descriptor cap, and each request opens multiple sockets. Values above ~150 will crash.
 
 Then run:
 

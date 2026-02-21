@@ -1,0 +1,25 @@
+"""Named constants for the Meta AI scraper."""
+
+# HTTP / TLS
+DEFAULT_TIMEOUT_SECONDS = 90
+TLS_IMPERSONATION_TARGET = "chrome110"
+
+# Threading ID generation (Meta's offline format)
+THREADING_ID_TOTAL_BITS = 64
+THREADING_ID_RANDOM_BITS = 22
+
+# Response quality validation
+MIN_RESPONSE_LENGTH = 200
+SESSION_EXHAUSTED_LENGTH = 1000
+
+# Challenge / retry limits
+MAX_CHALLENGE_ATTEMPTS = 3
+
+# Batch runner defaults
+DEFAULT_PARALLEL_REQUESTS = 500
+DEFAULT_TOTAL_REQUESTS = 1000
+DEFAULT_MAX_RETRIES = 2
+
+# Dashboard / display
+ROLLING_WINDOW_SIZE = 10
+PREVIEW_MAX_CHARS = 150

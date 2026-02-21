@@ -7,6 +7,7 @@ Falls back to Playwright for cookie extraction when curl_cffi gets blocked.
 """
 
 import json
+import logging
 import re
 import time
 import uuid
@@ -15,6 +16,25 @@ import asyncio
 from urllib.parse import unquote, urlparse
 
 from curl_cffi.requests import AsyncSession
+
+from constants import (
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_CHALLENGE_ATTEMPTS,
+    SESSION_EXHAUSTED_LENGTH,
+    THREADING_ID_RANDOM_BITS,
+    THREADING_ID_TOTAL_BITS,
+    TLS_IMPERSONATION_TARGET,
+)
+from exceptions import (
+    ChallengeError,
+    CookieExtractionError,
+    FetchSourcesError,
+    SendMessageError,
+    SessionExhaustedError,
+    TokenError,
+)
+
+logger = logging.getLogger("meta_ai.client")
 
 # Realistic User-Agent pool — each pool client gets a distinct one
 USER_AGENTS = [
@@ -48,11 +68,11 @@ USER_AGENTS = [
 
 def generate_offline_threading_id() -> str:
     """Generate an offline threading ID matching Meta's format."""
-    max_int = (1 << 64) - 1
-    mask22 = (1 << 22) - 1
+    max_int = (1 << THREADING_ID_TOTAL_BITS) - 1
+    mask = (1 << THREADING_ID_RANDOM_BITS) - 1
     timestamp = int(time.time() * 1000)
     random_value = int.from_bytes(os.urandom(8), "big")
-    return str(((timestamp << 22) | (random_value & mask22)) & max_int)
+    return str(((timestamp << THREADING_ID_RANDOM_BITS) | (random_value & mask)) & max_int)
 
 
 def extract_value(text: str, start_str: str, end_str: str) -> str:
@@ -84,9 +104,9 @@ class MetaAIClient:
         """Get or create a curl_cffi async session with Chrome TLS impersonation."""
         if self._session is None:
             self._session = AsyncSession(
-                impersonate="chrome110",
+                impersonate=TLS_IMPERSONATION_TARGET,
                 proxy=self.proxy,
-                timeout=90,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
                 verify=self.proxy is None,
             )
         return self._session
@@ -121,14 +141,13 @@ class MetaAIClient:
         )
 
         # Handle JavaScript bot-detection challenge (403 with /__rd_verify_ endpoint)
-        max_challenge_attempts = 3
-        for attempt in range(max_challenge_attempts):
+        for attempt in range(MAX_CHALLENGE_ATTEMPTS):
             if resp.status_code != 403 or "/__rd_verify_" not in resp.text:
                 break
 
             challenge_match = re.search(r"fetch\('(/__rd_verify_[^']+)'", resp.text)
             if not challenge_match:
-                raise Exception(
+                raise ChallengeError(
                     f"Got 403 with challenge page but could not extract challenge path: {resp.text[:500]}"
                 )
             challenge_path = challenge_match.group(1)
@@ -161,7 +180,7 @@ class MetaAIClient:
             )
 
         if resp.status_code != 200:
-            raise Exception(
+            raise ChallengeError(
                 f"Got HTTP {resp.status_code} from meta.ai: {resp.text[:500]}"
             )
 
@@ -180,7 +199,7 @@ class MetaAIClient:
             self.cookies["fb_dtsg"] = fb_dtsg
 
         if not self.cookies["lsd"]:
-            raise Exception(
+            raise CookieExtractionError(
                 "Failed to extract LSD token from Meta AI homepage. "
                 "Bot detection likely triggered. Try with a proxy."
             )
@@ -233,7 +252,7 @@ class MetaAIClient:
         )
 
         if resp.status_code != 200:
-            raise Exception(f"Token request failed: {resp.status_code} {resp.text[:500]}")
+            raise TokenError(f"Token request failed: {resp.status_code} {resp.text[:500]}")
 
         text = resp.text
 
@@ -252,7 +271,7 @@ class MetaAIClient:
                 continue
 
         if not data:
-            raise Exception(f"Failed to parse access token response: {text[:500]}")
+            raise TokenError(f"Failed to parse access token response: {text[:500]}")
 
         try:
             self.access_token = (
@@ -260,7 +279,7 @@ class MetaAIClient:
                 ["new_temp_user_auth"]["access_token"]
             )
         except (KeyError, TypeError) as e:
-            raise Exception(
+            raise TokenError(
                 f"Failed to extract access token: {e}\n"
                 f"Response: {json.dumps(data)[:500]}"
             )
@@ -319,7 +338,7 @@ class MetaAIClient:
         )
 
         if resp.status_code != 200:
-            raise Exception(
+            raise SendMessageError(
                 f"Send message failed: {resp.status_code} {resp.text[:500]}"
             )
 
@@ -327,7 +346,7 @@ class MetaAIClient:
 
     def _is_session_exhausted(self, response_text: str) -> bool:
         """Check if a response indicates an exhausted/invalid session."""
-        return len(response_text) < 1000 and (
+        return len(response_text) < SESSION_EXHAUSTED_LENGTH and (
             "missing_required_variable_value" in response_text
             or '"bot_response_message":null' in response_text
         )
@@ -348,7 +367,7 @@ class MetaAIClient:
             response_text = await self._fire_message(prompt)
 
             if self._is_session_exhausted(response_text):
-                raise Exception("Session exhausted even after refresh")
+                raise SessionExhaustedError("Session exhausted even after refresh")
 
         parsed = self.parse_response(response_text)
 
@@ -359,7 +378,7 @@ class MetaAIClient:
                 if sources:
                     parsed["raw_sources"] = sources
             except Exception:
-                pass
+                logger.debug("Source fetch failed", exc_info=True)
 
         return parsed
 
@@ -388,7 +407,7 @@ class MetaAIClient:
         )
 
         if resp.status_code != 200:
-            raise Exception(f"Fetch sources failed: {resp.status_code}")
+            raise FetchSourcesError(f"Fetch sources failed: {resp.status_code}")
 
         data = resp.json()
         references = (

@@ -17,6 +17,13 @@ from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
 
+from constants import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_PARALLEL_REQUESTS,
+    DEFAULT_TOTAL_REQUESTS,
+    MIN_RESPONSE_LENGTH,
+)
+from exceptions import LowQualityResponseError
 from meta_client import MetaAIClient
 
 # ---------------------------------------------------------------------------
@@ -27,9 +34,9 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 PROXY_URL = os.getenv("PROXY_URL", "")
 PROMPT = os.getenv("PROMPT", "What do you know about Tesla's latest updates?")
-TOTAL_REQUESTS = int(os.getenv("TOTAL_REQUESTS", "1000"))
-PARALLEL_REQUESTS = int(os.getenv("PARALLEL_REQUESTS", "15"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+TOTAL_REQUESTS = int(os.getenv("TOTAL_REQUESTS", str(DEFAULT_TOTAL_REQUESTS)))
+PARALLEL_REQUESTS = int(os.getenv("PARALLEL_REQUESTS", str(DEFAULT_PARALLEL_REQUESTS)))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "meta-ai.db"
 
@@ -111,9 +118,11 @@ async def run_single(
 
                 # Validate response quality — retry on empty or useless answers
                 if not text.strip():
-                    raise Exception("Empty response from Meta AI")
-                if len(text) < 200 and not sources:
-                    raise Exception(f"Low-quality response ({len(text)} chars, no sources): {text[:100]}")
+                    raise LowQualityResponseError("Empty response from Meta AI")
+                if len(text) < MIN_RESPONSE_LENGTH and not sources:
+                    raise LowQualityResponseError(
+                        f"Low-quality response ({len(text)} chars, no sources): {text[:100]}"
+                    )
 
                 await queue.put(
                     {
@@ -163,7 +172,7 @@ async def db_writer(
     conn: sqlite3.Connection,
     queue: asyncio.Queue,
     total: int,
-) -> None:
+) -> tuple[int, int]:
     """Consume results from the queue and write them to SQLite."""
     done = 0
     ok = 0

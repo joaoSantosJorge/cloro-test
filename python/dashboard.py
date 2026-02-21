@@ -6,10 +6,14 @@ Launch:
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from constants import ROLLING_WINDOW_SIZE
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "meta-ai.db"
 
@@ -70,8 +74,7 @@ with chart2:
 with chart3:
     st.subheader("Success Rate Over Time")
     df_sorted = df.sort_values("timestamp").reset_index(drop=True)
-    # Rolling success rate over a window of 10
-    window = min(10, len(df_sorted))
+    window = min(ROLLING_WINDOW_SIZE, len(df_sorted))
     df_sorted["rolling_rate"] = (
         df_sorted["success"].rolling(window, min_periods=1).mean() * 100
     )

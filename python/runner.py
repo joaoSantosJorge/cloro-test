@@ -7,6 +7,7 @@ writing every result to SQLite via a serialized db_writer coroutine.
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -25,6 +26,8 @@ from constants import (
 )
 from exceptions import LowQualityResponseError
 from meta_client import MetaAIClient
+
+logger = logging.getLogger("meta_ai.runner")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -143,7 +146,7 @@ async def run_single(
             except Exception as exc:
                 last_error = exc
                 if attempt < MAX_RETRIES:
-                    print(f"[runner] #{index} retry {attempt + 1}/{MAX_RETRIES}")
+                    logger.warning("Request #%d retry %d/%d", index, attempt + 1, MAX_RETRIES)
             finally:
                 await client.close()
 
@@ -210,18 +213,24 @@ async def db_writer(
             fail += 1
 
         rate = (ok / done * 100) if done else 0
-        print(
-            f"[runner] {done}/{total} done | OK: {ok} FAIL: {fail} | "
-            f"rate: {rate:.1f}% | last: {row['duration_ms']}ms"
+        logger.info(
+            "%d/%d done | OK: %d FAIL: %d | rate: %.1f%% | last: %dms",
+            done, total, ok, fail, rate, row["duration_ms"],
         )
 
     return ok, fail
 
 
 async def main() -> None:
-    print(f"[runner] Starting batch: {TOTAL_REQUESTS} requests, {PARALLEL_REQUESTS} parallel")
-    print(f"[runner] Prompt: {PROMPT[:80]}{'...' if len(PROMPT) > 80 else ''}")
-    print(f"[runner] DB: {DB_PATH}")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    logger.info("Starting batch: %d requests, %d parallel", TOTAL_REQUESTS, PARALLEL_REQUESTS)
+    logger.info("Prompt: %s", PROMPT[:80] + ("..." if len(PROMPT) > 80 else ""))
+    logger.info("DB: %s", DB_PATH)
 
     conn = init_db()
     semaphore = asyncio.Semaphore(PARALLEL_REQUESTS)
@@ -241,9 +250,9 @@ async def main() -> None:
 
     total = ok + fail
     rate = (ok / total * 100) if total else 0
-    print(f"\n[runner] COMPLETE: {total} requests")
-    print(f"[runner] Success: {ok} ({rate:.1f}%)")
-    print(f"[runner] Failed:  {fail}")
+    logger.info("COMPLETE: %d requests", total)
+    logger.info("Success: %d (%.1f%%)", ok, rate)
+    logger.info("Failed:  %d", fail)
 
 
 if __name__ == "__main__":

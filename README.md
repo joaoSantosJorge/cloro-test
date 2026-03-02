@@ -6,13 +6,13 @@ A CLI tool that queries Meta AI and returns structured JSON responses with text,
 
 ## How It Works
 
-The scraper operates in three stages per request:
+Meta AI was rebuilt as a Next.js app (as of March 2026) with a new `/api/graphql` endpoint using `doc_id`-based persisted queries and SSE streaming. The scraper operates in three stages per request:
 
-1. **Cookie extraction** — Visits `meta.ai` using `curl_cffi` with Chrome TLS fingerprinting to extract session tokens (`LSD`, `datr`, `abra_csrf`).
+1. **Challenge solving** — Visits `meta.ai` using `curl_cffi` with Chrome TLS fingerprinting. If a bot-detection challenge (`/__rd_verify_`) is returned, solves it to set required session cookies (`datr`, `rd_challenge`).
 
-2. **Access token** — Using the extracted cookies, calls Meta's GraphQL API to accept the Terms of Service as a temporary (anonymous) user, returning a short-lived OAuth access token.
+2. **Access token** — Calls the `acceptTOSForLoggedOut` GraphQL mutation to accept the Terms of Service as an anonymous user, returning a temporary Bearer token and `abraUserId`.
 
-3. **Message + Sources** — The access token sends the user's prompt via Meta's `sendMessage` GraphQL mutation. The streamed NDJSON response is parsed to extract the full text. If Meta AI references web sources, a follow-up `fetchSources` query resolves the real URLs.
+3. **Message + Sources** — Sends the user's prompt via the `sendMessageStream` SSE endpoint with the Bearer token. The streaming response is parsed for the final content and any inline sources (no separate fetch needed).
 
 ## Project Structure
 
@@ -20,7 +20,9 @@ The scraper operates in three stages per request:
 python/
   main.py            CLI entry point (single query)
   runner.py          Batch runner with SQLite storage
-  meta_client.py     Core scraper: cookie extraction, token auth, message sending
+  meta_client.py     Core scraper: challenge solving, token auth, SSE message sending
+  constants.py       Named constants (timeouts, retry limits, batch defaults)
+  exceptions.py      Custom exception hierarchy
   check_results.py   Terminal viewer + CSV export
   dashboard.py       Streamlit web dashboard
   requirements.txt   Python dependencies
@@ -171,12 +173,12 @@ For ad-hoc SQL queries, open `data/meta-ai.db` directly with [DB Browser for SQL
 
 The user's prompt is sent directly to Meta AI. The raw response is structured server-side because:
 
-- **Real sources** — Meta AI naturally includes `l.meta.ai` redirect URLs and `fetch_id` references that resolve to actual web sources. Injecting a system prompt causes the model to fabricate URLs.
-- **Reliability** — Meta AI doesn't consistently follow structured output instructions. Parsing the NDJSON stream is more reliable.
+- **Real sources** — Meta AI returns sources inline in the SSE stream via `contentRenderer`. Injecting a system prompt causes the model to fabricate URLs instead of returning real ones.
+- **Reliability** — Meta AI doesn't consistently follow structured output instructions. Parsing the SSE stream is more reliable.
 
 ### Session Management
 
-If a session is exhausted (token expired or rate-limited), the client automatically refreshes cookies and token, then retries once.
+If a session is exhausted (token expired or rate-limited), the client resets the Bearer token and `abraUserId`, re-runs the challenge + TOS flow, then retries once.
 
 ### Response Quality Validation
 

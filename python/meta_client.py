@@ -1,40 +1,41 @@
 """
-Core Meta AI client — cookie extraction, token auth, and message sending.
+Core Meta AI client — challenge solving, TOS acceptance, and message sending.
 
-Uses curl_cffi for TLS-fingerprinted HTTP requests (impersonates Chrome),
-eliminating the need for a headless browser for most operations.
-Falls back to Playwright for cookie extraction when curl_cffi gets blocked.
+Uses curl_cffi for TLS-fingerprinted HTTP requests (impersonates Chrome).
+Targets the new Next.js-based Meta AI API (as of March 2026) which uses:
+  - /api/graphql with JSON body and doc_id-based persisted queries
+  - SSE (Server-Sent Events) streaming for message responses
+  - Bearer token auth obtained via acceptTOSForLoggedOut mutation
 """
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
-import os
-import asyncio
-from urllib.parse import unquote, urlparse
 
 from curl_cffi.requests import AsyncSession
 
 from constants import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_CHALLENGE_ATTEMPTS,
-    SESSION_EXHAUSTED_LENGTH,
     THREADING_ID_RANDOM_BITS,
     THREADING_ID_TOTAL_BITS,
     TLS_IMPERSONATION_TARGET,
 )
 from exceptions import (
     ChallengeError,
-    CookieExtractionError,
-    FetchSourcesError,
     SendMessageError,
     SessionExhaustedError,
     TokenError,
 )
 
 logger = logging.getLogger("meta_ai.client")
+
+# Persisted query doc_ids for the new Next.js Meta AI API
+DOC_ID_ACCEPT_TOS = "38ea0730fbf07d317f0b3fd0239f1292"
+DOC_ID_SEND_MESSAGE = "ce4f00a6f56e598c600a23318ab0e69c"
 
 # Realistic User-Agent pool — each pool client gets a distinct one
 USER_AGENTS = [
@@ -75,24 +76,12 @@ def generate_offline_threading_id() -> str:
     return str(((timestamp << THREADING_ID_RANDOM_BITS) | (random_value & mask)) & max_int)
 
 
-def extract_value(text: str, start_str: str, end_str: str) -> str:
-    """Extract a value from text between start_str and end_str."""
-    start = text.find(start_str)
-    if start == -1:
-        return ""
-    value_start = start + len(start_str)
-    end = text.find(end_str, value_start)
-    if end == -1:
-        return ""
-    return text[value_start:end]
-
-
 class MetaAIClient:
     def __init__(self, proxy: str | None = None, client_id: int | None = None):
         self.proxy = proxy
         self.client_id = client_id
-        self.cookies: dict | None = None
         self.access_token: str | None = None
+        self.abra_user_id: str | None = None
         self.user_agent = (
             USER_AGENTS[client_id % len(USER_AGENTS)]
             if client_id is not None
@@ -117,10 +106,10 @@ class MetaAIClient:
             await self._session.close()
             self._session = None
 
-    async def get_cookies(self) -> dict:
+    async def _solve_challenge(self) -> None:
         """
-        Fetch cookies from the Meta AI homepage.
-        Uses curl_cffi with Chrome TLS impersonation to bypass fingerprinting.
+        Load the Meta AI homepage and solve bot-detection challenges.
+        Sets up session cookies (datr, rd_challenge) needed for API calls.
         """
         session = await self._get_session()
 
@@ -128,7 +117,7 @@ class MetaAIClient:
             "https://www.meta.ai/",
             headers={
                 "User-Agent": self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Cache-Control": "no-cache",
                 "Sec-Fetch-Dest": "document",
@@ -140,8 +129,7 @@ class MetaAIClient:
             allow_redirects=True,
         )
 
-        # Handle JavaScript bot-detection challenge (403 with /__rd_verify_ endpoint)
-        for attempt in range(MAX_CHALLENGE_ATTEMPTS):
+        for _ in range(MAX_CHALLENGE_ATTEMPTS):
             if resp.status_code != 403 or "/__rd_verify_" not in resp.text:
                 break
 
@@ -162,12 +150,11 @@ class MetaAIClient:
                 },
             )
 
-            # Retry the original homepage request
             resp = await session.get(
                 "https://www.meta.ai/",
                 headers={
                     "User-Agent": self.user_agent,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                     "Cache-Control": "no-cache",
                     "Sec-Fetch-Dest": "document",
@@ -181,347 +168,185 @@ class MetaAIClient:
 
         if resp.status_code != 200:
             raise ChallengeError(
-                f"Got HTTP {resp.status_code} from meta.ai: {resp.text[:500]}"
+                f"Got HTTP {resp.status_code} from meta.ai after challenge: {resp.text[:500]}"
             )
-
-        html = resp.text
-
-        self.cookies = {
-            "_js_datr": extract_value(html, '_js_datr":{"value":"', '",'),
-            "abra_csrf": extract_value(html, 'abra_csrf":{"value":"', '",'),
-            "datr": extract_value(html, 'datr":{"value":"', '",'),
-            "lsd": extract_value(html, '"LSD",[],{"token":"', '"}'),
-        }
-
-        # Extract fb_dtsg if available
-        fb_dtsg = extract_value(html, '"DTSGInitData",[],{"token":"', '"')
-        if fb_dtsg:
-            self.cookies["fb_dtsg"] = fb_dtsg
-
-        if not self.cookies["lsd"]:
-            raise CookieExtractionError(
-                "Failed to extract LSD token from Meta AI homepage. "
-                "Bot detection likely triggered. Try with a proxy."
-            )
-
-        return self.cookies
 
     async def get_access_token(self) -> str:
-        """Get an anonymous access token by accepting TOS as a temp user."""
-        if not self.cookies:
-            await self.get_cookies()
+        """
+        Accept TOS as an anonymous user and get a temporary access token.
+        Uses the new Next.js API endpoint with acceptTOSForLoggedOut mutation.
+        """
+        await self._solve_challenge()
 
         session = await self._get_session()
 
-        cookie_str = "; ".join(
-            [
-                f"_js_datr={self.cookies['_js_datr']}",
-                f"datr={self.cookies['datr']}",
-                f"abra_csrf={self.cookies['abra_csrf']}",
-                "ps_n=1",
-                "ps_l=1",
-                "dpr=2",
-            ]
-        )
-
         resp = await session.post(
-            "https://www.meta.ai/api/graphql/",
+            "https://www.meta.ai/api/graphql",
             headers={
                 "User-Agent": self.user_agent,
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
                 "Origin": "https://www.meta.ai",
                 "Referer": "https://www.meta.ai/",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "Cookie": cookie_str,
-                "X-Fb-Friendly-Name": "useAbraAcceptTOSForTempUserMutation",
-                "X-Fb-Lsd": self.cookies["lsd"],
-                "X-Asbd-Id": "129477",
             },
-            data={
-                "lsd": self.cookies["lsd"],
-                "fb_dtsg": self.cookies.get("fb_dtsg", ""),
-                "fb_api_caller_class": "RelayModern",
-                "fb_api_req_friendly_name": "useAbraAcceptTOSForTempUserMutation",
-                "variables": json.dumps({"dob": "1999-01-01", "tos_accepted": True}),
-                "doc_id": "7604648749596940",
+            json={
+                "doc_id": DOC_ID_ACCEPT_TOS,
+                "variables": {"input": {"dateOfBirth": "1995-01-01"}},
             },
         )
 
         if resp.status_code != 200:
-            raise TokenError(f"Token request failed: {resp.status_code} {resp.text[:500]}")
-
-        text = resp.text
-
-        # Response may have multiple JSON objects on separate lines (NDJSON)
-        data = None
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-                if "data" in parsed:
-                    data = parsed
-                    break
-            except json.JSONDecodeError:
-                continue
-
-        if not data:
-            raise TokenError(f"Failed to parse access token response: {text[:500]}")
-
-        try:
-            self.access_token = (
-                data["data"]["xab_abra_accept_terms_of_service"]
-                ["new_temp_user_auth"]["access_token"]
-            )
-        except (KeyError, TypeError) as e:
             raise TokenError(
-                f"Failed to extract access token: {e}\n"
-                f"Response: {json.dumps(data)[:500]}"
+                f"TOS acceptance failed: HTTP {resp.status_code} {resp.text[:500]}"
             )
+
+        data = resp.json()
+        accept_data = data.get("data", {}).get("acceptTOSForLoggedOut", {})
+
+        if accept_data.get("error"):
+            raise TokenError(f"TOS acceptance error: {accept_data['error']}")
+
+        self.access_token = accept_data.get("accessToken")
+        if not self.access_token:
+            raise TokenError(
+                f"No access token in TOS response: {json.dumps(data)[:500]}"
+            )
+
+        viewer = accept_data.get("viewer") or {}
+        self.abra_user_id = viewer.get("abraUserId")
 
         return self.access_token
 
     async def ensure_session(self):
-        """Ensure we have valid cookies and access token."""
-        if not self.cookies:
-            await self.get_cookies()
+        """Ensure we have a valid access token."""
         if not self.access_token:
             await self.get_access_token()
-
-    async def _fire_message(self, prompt: str) -> str:
-        """
-        Fire a single GraphQL sendMessage call and return the raw response text.
-        Does NOT handle retries or session refresh.
-        """
-        session = await self._get_session()
-        conversation_id = str(uuid.uuid4())
-        threading_id = generate_offline_threading_id()
-
-        variables = {
-            "message": {"sensitive_string_value": prompt},
-            "externalConversationId": conversation_id,
-            "offlineThreadingId": threading_id,
-            "suggestedPromptIndex": None,
-            "flashVideoRecapInput": {"images": []},
-            "flashPreviewInput": None,
-            "promptPrefix": None,
-            "entrypoint": "ABRA__CHAT__TEXT",
-            "icebreaker_type": "TEXT",
-        }
-
-        resp = await session.post(
-            "https://graph.meta.ai/graphql?locale=user",
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "https://www.meta.ai",
-                "Referer": "https://www.meta.ai/",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-site",
-                "Authorization": f"OAuth {self.access_token}",
-            },
-            data={
-                "fb_api_caller_class": "RelayModern",
-                "fb_api_req_friendly_name": "useAbraSendMessageMutation",
-                "variables": json.dumps(variables),
-                "server_timestamps": "true",
-                "doc_id": "7783822248314888",
-            },
-        )
-
-        if resp.status_code != 200:
-            raise SendMessageError(
-                f"Send message failed: {resp.status_code} {resp.text[:500]}"
-            )
-
-        return resp.text
-
-    def _is_session_exhausted(self, response_text: str) -> bool:
-        """Check if a response indicates an exhausted/invalid session."""
-        return len(response_text) < SESSION_EXHAUSTED_LENGTH and (
-            "missing_required_variable_value" in response_text
-            or '"bot_response_message":null' in response_text
-        )
 
     async def send_message(self, prompt: str) -> dict:
         """
         Send a message to Meta AI and return the parsed response.
-        If the session is exhausted, automatically refreshes and retries once.
+        Uses SSE streaming via the /api/graphql endpoint.
         """
         await self.ensure_session()
 
         response_text = await self._fire_message(prompt)
 
-        # Detect exhausted token — refresh session and retry once
-        if self._is_session_exhausted(response_text):
+        # Check for session exhaustion
+        if len(response_text) < 200 and "error" in response_text.lower():
+            # Refresh session and retry once
             self.reset_session()
             await self.ensure_session()
             response_text = await self._fire_message(prompt)
 
-            if self._is_session_exhausted(response_text):
+            if len(response_text) < 200 and "error" in response_text.lower():
                 raise SessionExhaustedError("Session exhausted even after refresh")
 
-        parsed = self.parse_response(response_text)
+        return self._parse_sse_response(response_text)
 
-        # Fetch real source URLs if a fetch_id is available
-        if parsed.get("fetch_id"):
-            try:
-                sources = await self.fetch_sources(parsed["fetch_id"])
-                if sources:
-                    parsed["raw_sources"] = sources
-            except Exception:
-                logger.debug("Source fetch failed", exc_info=True)
-
-        return parsed
-
-    async def fetch_sources(self, fetch_id: str) -> list:
-        """Fetch real source URLs using the fetch_id from a response."""
+    async def _fire_message(self, prompt: str) -> str:
+        """
+        Send a single message via the /api/graphql SSE endpoint.
+        Returns the raw SSE response text.
+        """
         session = await self._get_session()
 
+        conversation_id = str(uuid.uuid4())
+        user_msg_id = str(uuid.uuid4())
+        assistant_msg_id = str(uuid.uuid4())
+        turn_id = str(uuid.uuid4())
+        threading_id = generate_offline_threading_id()
+
+        variables = {
+            "conversationId": conversation_id,
+            "content": prompt,
+            "userMessageId": user_msg_id,
+            "assistantMessageId": assistant_msg_id,
+            "userUniqueMessageId": threading_id,
+            "turnId": turn_id,
+        }
+
         resp = await session.post(
-            "https://graph.meta.ai/graphql?locale=user",
+            "https://www.meta.ai/api/graphql",
             headers={
                 "User-Agent": self.user_agent,
-                "Accept": "*/*",
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
                 "Origin": "https://www.meta.ai",
                 "Referer": "https://www.meta.ai/",
-                "Authorization": f"OAuth {self.access_token}",
+                "Authorization": f"Bearer {self.access_token}",
+                "X-Abra-User-Id": self.abra_user_id or "",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
             },
-            data={
-                "access_token": self.access_token,
-                "fb_api_caller_class": "RelayModern",
-                "fb_api_req_friendly_name": "AbraSearchPluginDialogQuery",
-                "variables": json.dumps({"abraMessageFetchID": fetch_id}),
-                "server_timestamps": "true",
-                "doc_id": "6946734308765963",
+            json={
+                "doc_id": DOC_ID_SEND_MESSAGE,
+                "variables": variables,
             },
         )
 
         if resp.status_code != 200:
-            raise FetchSourcesError(f"Fetch sources failed: {resp.status_code}")
-
-        data = resp.json()
-        references = (
-            (data.get("data", {}).get("message", {}) or {})
-            .get("searchResults", {})
-            or (data.get("data", {}).get("message", {}) or {})
-            .get("search_results", {})
-            or {}
-        ).get("references", [])
-
-        return [
-            {
-                "url": ref.get("url") or ref.get("link", ""),
-                "label": ref.get("title") or ref.get("name", ""),
-                "description": ref.get("snippet") or ref.get("description", ""),
-            }
-            for ref in references
-        ]
-
-    def parse_response(self, response_text: str) -> dict:
-        """Parse the NDJSON streaming response from Meta AI."""
-        last_valid_response = None
-        raw_sources = []
-        fetch_id = None
-
-        for line in response_text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            # Extract bot response message from streamed or initial response
-            bot_msg = None
-            if isinstance(data.get("data"), dict):
-                node = data["data"].get("node")
-                if isinstance(node, dict):
-                    bot_msg = node.get("bot_response_message")
-                if not bot_msg:
-                    send_msg = data["data"].get("xfb_abra_send_message")
-                    if isinstance(send_msg, dict):
-                        bot_msg = send_msg.get("bot_response_message")
-
-            if bot_msg and isinstance(bot_msg, dict):
-                content_list = (bot_msg.get("composed_text") or {}).get("content", [])
-                if content_list:
-                    last_valid_response = bot_msg
-                if bot_msg.get("fetch_id"):
-                    fetch_id = bot_msg["fetch_id"]
-
-            # Look for source references
-            search_results = None
-            if isinstance(data.get("data"), dict):
-                node = data["data"].get("node")
-                if isinstance(node, dict):
-                    search_results = node.get("search_results")
-                if not search_results:
-                    send_msg = data["data"].get("xfb_abra_send_message")
-                    if isinstance(send_msg, dict):
-                        bot_resp = send_msg.get("bot_response_message")
-                        if isinstance(bot_resp, dict):
-                            search_results = bot_resp.get("search_results")
-
-            if search_results and isinstance(search_results, dict):
-                for ref in search_results.get("references", []):
-                    raw_sources.append(
-                        {
-                            "url": ref.get("url", ""),
-                            "label": ref.get("title", ""),
-                            "description": ref.get("snippet", ""),
-                        }
-                    )
-
-        if not last_valid_response:
-            return {"text": "", "raw_sources": [], "fetch_id": None}
-
-        # Build full text from composed_text.content
-        text_parts = [
-            c.get("text", "")
-            for c in (last_valid_response.get("composed_text") or {}).get(
-                "content", []
+            raise SendMessageError(
+                f"Send message failed: HTTP {resp.status_code} {resp.text[:500]}"
             )
-        ]
-        full_text = "\n".join(text_parts)
 
-        # Extract inline sources if no structured sources found
-        if not raw_sources:
-            raw_sources = self._extract_inline_sources(full_text)
+        return resp.text
 
-        return {"text": full_text, "raw_sources": raw_sources, "fetch_id": fetch_id}
-
-    def _extract_inline_sources(self, text: str) -> list:
-        """Extract source URLs from Meta AI's inline source references."""
+    def _parse_sse_response(self, response_text: str) -> dict:
+        """Parse the SSE streaming response from the new Meta AI API."""
+        last_content = ""
         sources = []
-        pattern = r"https?://l\.meta\.ai/\?u=([^&\s]+)"
-        for match in re.finditer(pattern, text):
-            decoded_url = unquote(match.group(1))
-            try:
-                hostname = urlparse(decoded_url).hostname or decoded_url
-            except Exception:
-                hostname = decoded_url
-            sources.append(
-                {"url": decoded_url, "label": hostname, "description": ""}
-            )
-        return sources
+
+        # SSE events are separated by double newlines
+        events = response_text.split("\n\n")
+        for event in events:
+            for line in event.strip().split("\n"):
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
+                msg = data.get("data", {}).get("sendMessageStream")
+                if not msg:
+                    continue
+
+                content = msg.get("content", "")
+                if content:
+                    last_content = content
+
+                # Extract sources from contentRenderer
+                renderer = msg.get("contentRenderer") or {}
+                renderer_msg = renderer.get("message") or {}
+                msg_sources = renderer_msg.get("sources") or []
+                if msg_sources:
+                    sources = msg_sources
+
+                # Also check unified_response for sources
+                unified = renderer.get("unified_response") or {}
+                unified_sources = unified.get("sources") or []
+                if unified_sources:
+                    sources = unified_sources
+
+        return {
+            "text": last_content,
+            "raw_sources": [
+                {
+                    "url": src.get("url", ""),
+                    "label": src.get("title") or src.get("label", ""),
+                    "description": src.get("snippet") or src.get("description", ""),
+                }
+                for src in sources
+            ],
+        }
 
     async def prompt(self, text: str) -> dict:
         """
         Send a prompt to Meta AI and return a structured response.
-        Sends without system prompt to ensure real source URLs are returned,
-        then structures the response server-side.
         """
         raw_response = await self.send_message(text)
         response_text = raw_response.get("text", "")
@@ -559,5 +384,5 @@ class MetaAIClient:
 
     def reset_session(self):
         """Reset session to force re-authentication."""
-        self.cookies = None
         self.access_token = None
+        self.abra_user_id = None

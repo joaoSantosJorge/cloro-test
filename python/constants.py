@@ -10,7 +10,6 @@ THREADING_ID_RANDOM_BITS = 22
 
 # Response quality validation
 MIN_RESPONSE_LENGTH = 200
-SESSION_EXHAUSTED_LENGTH = 1000
 
 # Challenge / retry limits
 MAX_CHALLENGE_ATTEMPTS = 3
